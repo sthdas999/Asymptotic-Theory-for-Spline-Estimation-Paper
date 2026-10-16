@@ -1,6 +1,6 @@
 ############################################################
 # Simulation Study
-# Asymptotic Theory for Adaptive Spline Estimation in a
+# Asymptotic Theory for Spline Estimation in a
 # Multivariate Semiparametric Regression Model
 ############################################################
 
@@ -57,20 +57,43 @@ m.true <- function(x) {
   
 }
 ############################################################
-# Choice of spline dimension
+# Choice of total spline-basis dimension
+#
+# K is the TOTAL number of basis functions, not the number of
+# interior knots. For p-dimensional covariates and smoothness r,
+# the rule K_n = ceil(n^alpha) uses
+#       p/(2r) < alpha < 1/2,
+# which is compatible with K_n^(-r/p) = o(n^(-1/2)) and
+# sqrt(K_n/n) = o(n^(-1/4)), under the stated spline-rate framework.
+# The midpoint is used as a deterministic rule; this is NOT a
+# data-adaptive selection procedure.
 ############################################################
 
-choose.K <- function(n, r = 2) {
-  
-  K <- ceiling(n^(1 / (2 * r + 1)))
-  
+choose.K <- function(n, r = 2, p = 1) {
+  if (length(n) != 1L || !is.finite(n) || n < 1) {
+    stop("n must be a positive finite scalar.")
+  }
+  if (length(p) != 1L || !is.finite(p) || p < 1) {
+    stop("p must be a positive finite scalar.")
+  }
+  if (length(r) != 1L || !is.finite(r) || r <= p) {
+    stop("This dimension rule requires smoothness r > p.")
+  }
+
+  alpha.lower <- p / (2 * r)
+  alpha.upper <- 1 / 2
+  alpha <- (alpha.lower + alpha.upper) / 2
+
+  # Cubic B-splines require at least four basis functions.
+  K <- max(4L, as.integer(ceiling(n^alpha)))
   return(K)
-  
 }
 
-choose.K(200, r)
-choose.K(500, r)
-choose.K(1000, r)
+K.check <- data.frame(
+  n = n.values,
+  K = vapply(n.values, choose.K, integer(1), r = r, p = p)
+)
+print(K.check)
 ############################################################
 # Generate error vectors under the five models
 ############################################################
@@ -295,20 +318,20 @@ generate.data <- function(n, model, r = 2) {
 ############################################################
 
 construct.spline.basis <- function(x, K) {
-  
-  n <- length(x)
-  
-  # Number of interior knots
-  n.inter <- max(1, K - 4)
-  
-  knots <- seq(
-    from = 0,
-    to = 1,
-    length.out = n.inter + 2
-  )
-  
-  knots <- knots[-c(1, length(knots))]
-  
+  # K denotes the requested TOTAL number of basis functions.
+  # A cubic B-spline with intercept has K = number of interior knots + 4.
+  if (length(K) != 1L || !is.finite(K) || K < 4 || K != as.integer(K)) {
+    stop("K must be an integer of at least 4 for a cubic B-spline basis.")
+  }
+
+  n.inter <- as.integer(K) - 4L
+  if (n.inter > 0L) {
+    knot.grid <- seq(from = 0, to = 1, length.out = n.inter + 2L)
+    knots <- knot.grid[-c(1L, length(knot.grid))]
+  } else {
+    knots <- numeric(0)
+  }
+
   B <- splines::bs(
     x,
     degree = 3,
@@ -316,7 +339,11 @@ construct.spline.basis <- function(x, K) {
     Boundary.knots = c(0, 1),
     intercept = TRUE
   )
-  
+
+  if (ncol(B) != K) {
+    stop(sprintf("Requested K = %d basis functions, but constructed %d.",
+                 K, ncol(B)))
+  }
   return(B)
 }
 ############################################################
@@ -508,16 +535,24 @@ sandwich.se <- function(A.hat,
   
   ##########################################################
   # Standard errors
+  # Sigma.A uses column-wise vec(A) ordering:
+  # (A11, A21, ..., Aq1, A12, ..., Aqd).
+  # The simulation stores estimates in row-wise order via as.vector(t(A)),
+  # namely (A11, A12, ..., A1d, A21, ..., Aqd). Reorder the SEs to match.
   ##########################################################
-  
-  SE <- sqrt(
-    pmax(diag(Sigma.A), 0)
+
+  SE.columnwise <- sqrt(pmax(diag(Sigma.A), 0))
+  idx.rowwise <- unlist(
+    lapply(seq_len(q), function(i) i + (seq_len(d) - 1L) * q),
+    use.names = FALSE
   )
-  
+  SE.rowwise <- SE.columnwise[idx.rowwise]
+
   return(
     list(
-      covariance = Sigma.A,
-      SE = SE
+      covariance = Sigma.A,       # covariance remains in column-wise vec(A) order
+      SE.columnwise = SE.columnwise,
+      SE = SE.rowwise             # SE matches as.vector(t(A.hat)) downstream
     )
   )
 }
